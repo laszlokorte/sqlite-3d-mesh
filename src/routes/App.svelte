@@ -8,6 +8,7 @@
 	let edges = $state(undefined);
 	let faces = $state(undefined);
 	let camera = $state({});
+	let viewport = $state({ width: 0, height: 0 });
 
 	let db;
 
@@ -21,16 +22,16 @@
 		db = new SQL.Database();
 		let sqlstr = [
 			"CREATE TABLE camera (id integer primary key, tx real NOT NULL, ty real NOT NULL, tz real NOT NULL, near real NOT NULL, far real NOT NULL, fov real NOT NULL, aspect real NOT NULL) STRICT",
-			"CREATE TABLE viewport (id integer primary key, width REAL NOT NULL, height REAL NOT NULL) STRICT",
+			"CREATE TABLE viewport (id integer primary key, width REAL NOT NULL, height REAL NOT NULL, camera_id integer NOT NULL REFERENCES camera(id)) STRICT",
 			"CREATE TABLE model (id integer primary key) STRICT",
 			"CREATE TABLE vertex (id integer primary key, model_id integer NOT NULL REFERENCES model(id), x real NOT NULL, y real NOT NULL, z real NOT NULL) STRICT",
 			"CREATE VIEW camera_vertex AS SELECT v.id AS vertex_id, c.id AS camera_id, (v.x-c.tx) AS x, (v.y-c.ty) AS y, (v.z-c.tz) AS z FROM vertex v, camera c",
 			"CREATE VIEW perspective_vertex AS SELECT v.vertex_id AS vertex_id, v.camera_id AS camera_id, (v.x/tan(c.fov/2)*c.aspect) AS x, (v.y/tan(c.fov/2)) AS y, (-v.z*((c.far+c.near)/(c.far-c.near))-((2*c.far*c.near)/(c.far-c.near))) AS z, -v.z as w FROM camera_vertex v INNER JOIN camera c ON c.id = v.camera_id",
-			"CREATE VIEW projected_vertex AS SELECT v.vertex_id AS vertex_id, v.camera_id AS camera_id, (v.x/v.w) AS x, (v.y/v.w) AS y, (v.z/v.w) AS z, v.w AS w, v.z AS oz FROM perspective_vertex v WHERE abs(v.x) < abs(v.w) AND  abs(v.y) < abs(v.w)  AND v.z < v.w AND v.z > -v.w",
+			"CREATE VIEW projected_vertex AS SELECT vp.id AS viewport_id, v.vertex_id AS vertex_id, v.camera_id AS camera_id, vp.width * (0.5 + 0.5*(v.x/v.w)) AS x, vp.height * (0.5 + 0.5*(v.y/v.w)) AS y, (v.z/v.w) AS z, v.w AS w, v.z AS oz FROM perspective_vertex v INNER JOIN viewport vp ON vp.camera_id = v.camera_id WHERE abs(v.x) < abs(v.w) AND  abs(v.y) < abs(v.w)  AND v.z < v.w AND v.z > -v.w",
 			"CREATE TABLE edge (id integer primary key, model_id integer NOT NULL REFERENCES model(id), start_vertex_id integer NOT NULL REFERENCES vertex(id), end_vertex_id integer NOT NULL REFERENCES vertex(id)) STRICT",
 			"CREATE TABLE face (id integer primary key, model_id integer NOT NULL REFERENCES model(id)) STRICT",
 			"CREATE TABLE face_vertex (id integer primary key, model_id integer NOT NULL REFERENCES model(id), face_id integer NOT NULL REFERENCES face(id), vertex_id integer NOT NULL REFERENCES vertex(id), sort integer) STRICT",
-			"INSERT INTO viewport(id,width,height) VALUES(1, 1, 1)",
+			"INSERT INTO viewport(id, camera_id, width,height) VALUES(1, 1, 1, 1)",
 			"INSERT INTO camera(id,tx,ty,tz, near, far, fov, aspect) VALUES(1, 0, 0, 0.1, 3, 100, 1, 1)",
 			"INSERT INTO model(id) VALUES(1)",
 			"INSERT INTO vertex(model_id, id, x, y, z) VALUES(1, 1, 1, 2, 3), (1, 2, 3, 2, 3), (1, 3, -1, -3, 3),(1, 4, -1, 4, 5), (1, 5, -3, 2, 6), (1, 6, 3, -3, 7)",
@@ -68,16 +69,24 @@
 	function update(db) {
 		if (db) {
 			{
-				const stmt = db.prepare("SELECT *  FROM camera");
+				const stmt = db.prepare("SELECT * FROM camera");
 				if (stmt.step()) {
 					camera = stmt.getAsObject();
+				}
+			}
+
+			{
+				const stmt = db.prepare("SELECT * FROM viewport");
+				if (stmt.step()) {
+					viewport = stmt.getAsObject();
+					console.log(viewport);
 				}
 			}
 
 			// Prepare an sql statement
 			{
 				const stmt = db.prepare(
-					"SELECT vertex_id AS id, x, y, z, w, oz FROM projected_vertex WHERE camera_id = 1",
+					"SELECT vertex_id AS id, x, y, z, w, oz FROM projected_vertex WHERE viewport_id = 1",
 				);
 				const rows = [];
 				while (stmt.step()) {
@@ -90,7 +99,7 @@
 
 			{
 				const stmt = db.prepare(
-					"SELECT edge.id AS id, a.x AS x1, a.y AS y1, a.z AS z1, b.x AS x2, b.y AS y2, b.z AS z2 FROM edge INNER JOIN projected_vertex a ON a.vertex_id = edge.start_vertex_id INNER JOIN projected_vertex b ON b.vertex_id = edge.end_vertex_id WHERE (a.camera_id, b.camera_id) = (1,1)",
+					"SELECT edge.id AS id, a.x AS x1, a.y AS y1, a.z AS z1, b.x AS x2, b.y AS y2, b.z AS z2 FROM edge INNER JOIN projected_vertex a ON a.vertex_id = edge.start_vertex_id INNER JOIN projected_vertex b ON b.vertex_id = edge.end_vertex_id WHERE (a.viewport_id, b.viewport_id) = (1,1)",
 				);
 				const rows = [];
 				while (stmt.step()) {
@@ -103,7 +112,7 @@
 
 			{
 				const stmt = db.prepare(
-					"SELECT face.id AS face_id, v.vertex_id AS vertex_id, v.x AS x,v.y AS y, v.z AS z FROM face INNER JOIN face_vertex fv ON fv.face_id = face.id INNER JOIN projected_vertex v ON v.vertex_id = fv.vertex_id WHERE v.camera_id = 1 ORDER BY fv.sort ASC",
+					"SELECT face.id AS face_id, v.vertex_id AS vertex_id, v.x AS x,v.y AS y, v.z AS z FROM face INNER JOIN face_vertex fv ON fv.face_id = face.id INNER JOIN projected_vertex v ON v.vertex_id = fv.vertex_id WHERE v.viewport_id = 1 ORDER BY fv.sort ASC",
 				);
 				const rows = {};
 				while (stmt.step()) {
@@ -120,67 +129,82 @@
 	}
 </script>
 
-<form
-	oninput={(evt) => {
-		const pos = Object.fromEntries(new FormData(evt.currentTarget));
-		setCamera(db, pos.x, pos.y, pos.z, pos.near, pos.far, pos.fov);
-	}}
->
-	<input
-		name="x"
-		step="0.01"
-		type="range"
-		min="-60"
-		max="60"
-		value={camera.tx}
-	/>
-	<input
-		name="y"
-		step="0.01"
-		type="range"
-		min="-60"
-		max="60"
-		value={camera.ty}
-	/>
-	<input
-		name="z"
-		step="0.01"
-		type="range"
-		min="-60"
-		max="60"
-		value={camera.tz}
-	/>
-	<input
-		name="near"
-		step="0.01"
-		type="range"
-		min="0.1"
-		max="100"
-		value={camera.near}
-	/>
-	<input
-		name="far"
-		step="0.01"
-		type="range"
-		min="0.1"
-		max="100"
-		value={camera.far}
-	/>
-	<input
-		name="fov"
-		step="0.01"
-		type="range"
-		min="0.1"
-		max="3"
-		value={camera.fov}
-	/>
-</form>
+<div style="position: absolute;">
+	<form
+		oninput={(evt) => {
+			const pos = Object.fromEntries(new FormData(evt.currentTarget));
+			setCamera(db, pos.x, pos.y, pos.z, pos.near, pos.far, pos.fov);
+		}}
+	>
+		<label
+			>x: <input
+				name="x"
+				step="0.0001"
+				type="range"
+				min="-60"
+				max="60"
+				value={camera.tx}
+			/></label
+		>
+		<label
+			>y: <input
+				name="y"
+				step="0.0001"
+				type="range"
+				min="-60"
+				max="60"
+				value={camera.ty}
+			/></label
+		>
+		<label
+			>z: <input
+				name="z"
+				step="0.0001"
+				type="range"
+				min="-60"
+				max="60"
+				value={camera.tz}
+			/></label
+		>
+		<label
+			>near: <input
+				name="near"
+				step="0.0001"
+				type="range"
+				min="0.1"
+				max="100"
+				value={camera.near}
+			/></label
+		>
+		<label
+			>far: <input
+				name="far"
+				step="0.0001"
+				type="range"
+				min="0.1"
+				max="100"
+				value={camera.far}
+			/></label
+		>
+		<label
+			>fov: <input
+				name="fov"
+				step="0.0001"
+				type="range"
+				min="0.1"
+				max="3"
+				value={camera.fov}
+			/></label
+		>
+	</form>
 
-<pre style="position: absolute;">{JSON.stringify(vertices, null, "  ")}
-<br />
+	<pre>{JSON.stringify(vertices, null, "  ")}
+</pre>
+	<pre>
 {JSON.stringify(camera, null, "  ")}</pre>
+</div>
 
-<svg viewBox="-1 -1 2 2">
+<svg viewBox="0 0 {viewport.width} {viewport.height}">
 	{#each faces as f}
 		<polygon
 			fill="#fee"
@@ -190,7 +214,7 @@
 
 	{#each edges as e}
 		<line
-			stroke-width="0.01"
+			stroke-width="1"
 			stroke="black"
 			r="0.1"
 			x1={e.x1}
@@ -200,7 +224,7 @@
 		></line>
 	{/each}
 	{#each vertices as v}
-		<circle r="0.03" cx={v.x} cy={v.y}></circle>
+		<circle r="5" cx={v.x} cy={v.y}></circle>
 	{/each}
 </svg>
 
