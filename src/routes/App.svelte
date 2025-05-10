@@ -2,10 +2,19 @@
 	import { onMount } from "svelte";
 	import { makeDB } from "./duck.js";
 	import initSqlJs from "sql.js";
-	import model1 from "./cube.obj?raw";
-	import model2 from "./suzanne.obj?raw";
+	import cube from "./cube.obj?raw";
+	import suzanne from "./suzanne.obj?raw";
+	import torus from "./torus.obj?raw";
+	import teapot from "./teapot.obj?raw";
 	// or if you are in a browser:
 	// const initSqlJs = window.initSqlJs;
+
+	const models = {
+		cube: [cube, 4, 4, 4],
+		suzanne: [suzanne, -10, -10, 10],
+		torus: [torus, 4, 4, 4],
+		teapot: [teapot, -7, -7, 7],
+	};
 
 	let clockwise = $state(null);
 	let vertices = $state([]);
@@ -116,6 +125,7 @@
 			if (line.startsWith("o ")) {
 				insertModel.step();
 				[modelId] = insertModel.get();
+				insertModelTransform.reset();
 				insertModelTransform.bind([modelId, tx, ty, tz]);
 				insertModelTransform.step();
 				const [modelTransformId] = insertModelTransform.get();
@@ -124,6 +134,7 @@
 					.slice("v ".length)
 					.split(/\s+/, 3)
 					.map(parseFloat);
+				insertVertex.reset();
 				insertVertex.bind([modelId, sx * x, sy * y, sz * z]);
 				insertVertex.step();
 				const [vertexId] = insertVertex.get();
@@ -141,11 +152,13 @@
 					);
 
 				if (vertices.length === 3) {
+					insertFace.reset();
 					insertFace.bind([modelId]);
 					insertFace.step();
 					const [faceId] = insertFace.get();
 					let i = 0;
 					for (const [v] of vertices) {
+						insertFaceVertex.reset();
 						insertFaceVertex.bind([
 							modelId,
 							faceId,
@@ -160,11 +173,13 @@
 						[vertices[0], vertices[1], vertices[2]],
 						[vertices[0], vertices[2], vertices[3]],
 					]) {
+						insertFace.reset();
 						insertFace.bind([modelId]);
 						insertFace.step();
 						const [faceId] = insertFace.get();
 						let i = 0;
 						for (const [v] of verts) {
+							insertFaceVertex.reset();
 							insertFaceVertex.bind([
 								modelId,
 								faceId,
@@ -222,7 +237,7 @@
 		);
 		setViewport(db, window.innerWidth, window.innerHeight);
 
-		importModel(db, model1, 4, 4, 4, { tx: 10 });
+		importModel(db, cube, 4, 4, 4, { tx: 10 });
 
 		update(db);
 
@@ -231,7 +246,13 @@
 			edges = undefined;
 			faces = undefined;
 
-			Object.values(statements).forEach((s) => s.free());
+			Object.values(statements).forEach((s) => {
+				s.free();
+			});
+			if (db) {
+				db.close();
+				db = null;
+			}
 		};
 	});
 
@@ -248,6 +269,21 @@
 			"UPDATE model_transform SET tx=?, ty=?, tz=?, rx=?, ry=?, rz=?, sx=?, sy=?, sz=? WHERE model_id = ?",
 			[tx, ty, tz, rx, ry, rz, sx, sy, sz, model],
 		);
+		update(db);
+	}
+
+	function rotateAll(db, x, y) {
+		db.run(
+			"UPDATE model_transform SET rx = max(-3.14, min(3.14, rx + ?)), ry = ry + sign(3.14/2 - abs(rx)) * ?",
+			[-y / 60, x / 60],
+		);
+		update(db);
+	}
+
+	function zoom(db, delta) {
+		db.run("UPDATE camera SET fov = max(0, min(fov * exp(?), 3.14))", [
+			delta / 1400,
+		]);
 		update(db);
 	}
 
@@ -290,6 +326,7 @@
 			// Prepare an sql statement
 			{
 				const rows = [];
+				statements.vertexSelect.reset();
 				statements.vertexSelect.bind({ $viewport: 1 });
 				while (statements.vertexSelect.step()) {
 					//
@@ -301,6 +338,7 @@
 
 			{
 				const rows = [];
+				statements.edgeSelect.reset();
 				statements.edgeSelect.bind({ $viewport: 1 });
 				while (statements.edgeSelect.step()) {
 					//
@@ -311,6 +349,7 @@
 
 			{
 				const rows = [];
+				statements.faceSelect.reset();
 				statements.faceSelect.bind({
 					$viewport: 1,
 					$clockwise: clockwise,
@@ -436,25 +475,17 @@
 		</form>
 
 		<div>
-			<button
-				type="button"
-				onclick={(e) => {
-					importModel(db, model1, 4, 4, 4, {
-						tx: 10 - 10 * transform.length,
-					});
-					update(db);
-				}}>Add Cube</button
-			>
-
-			<button
-				type="button"
-				onclick={(e) => {
-					importModel(db, model2, -8, -8, 8, {
-						tx: 10 - 10 * transform.length,
-					});
-					update(db);
-				}}>Add Suzanne</button
-			>
+			{#each Object.entries(models) as [name, m]}
+				<button
+					type="button"
+					onclick={(e) => {
+						importModel(db, ...m, {
+							tx: 10 - 10 * transform.length,
+						});
+						update(db);
+					}}>Add {name}</button
+				>
+			{/each}
 		</div>
 
 		{#each transform as t}
@@ -589,7 +620,28 @@
 		</div>
 	</div>
 
-	<svg class="viewport" viewBox="0 0 {viewport.width} {viewport.height}">
+	<svg
+		onpointerdown={(evt) => {
+			if (evt.isPrimary) {
+				evt.currentTarget.setPointerCapture(evt.pointerId);
+				evt.preventDefault();
+			}
+		}}
+		onpointermove={(evt) => {
+			if (
+				evt.isPrimary &&
+				evt.currentTarget.hasPointerCapture(evt.pointerId)
+			) {
+				rotateAll(db, evt.movementX, evt.movementY);
+			}
+		}}
+		onwheel={(evt) => {
+			evt.preventDefault();
+			zoom(db, evt.deltaY);
+		}}
+		class="viewport"
+		viewBox="0 0 {viewport.width} {viewport.height}"
+	>
 		{#each faces as f}
 			<polygon
 				data-model={f.model_id}
@@ -624,7 +676,6 @@
 		right: 0;
 		width: 100%;
 		height: 100%;
-		pointer-events: none;
 	}
 	.app {
 		display: grid;
@@ -645,6 +696,7 @@
 		gap: 1em;
 		display: grid;
 		align-content: start;
+		z-index: 10;
 	}
 
 	.viewport {
