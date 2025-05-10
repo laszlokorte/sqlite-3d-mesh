@@ -428,7 +428,7 @@
 			<button
 				type="button"
 				onclick={(e) => {
-					importModel(db, model2, 8, -8, 8, {
+					importModel(db, model2, -8, -8, 8, {
 						tx: 10 - 10 * transform.length,
 					});
 					update(db);
@@ -624,14 +624,6 @@
 		gap: 1em;
 		display: grid;
 		align-content: start;
-	}
-
-	.debug {
-		overflow: auto;
-		max-height: 20em;
-		background: #fff;
-		padding: 1ex;
-		white-space: pre;
 	}
 
 	.viewport {
