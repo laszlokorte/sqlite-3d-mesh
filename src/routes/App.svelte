@@ -1,5 +1,6 @@
 <script>
 	import { onMount } from "svelte";
+	import { makeDB } from "./duck.js";
 	import initSqlJs from "sql.js";
 	import model1 from "./cube.obj?raw";
 	import model2 from "./suzanne.obj?raw";
@@ -21,6 +22,9 @@
 		`CREATE TABLE model (id integer primary key AUTOINCREMENT ) STRICT`,
 		`CREATE TABLE model_transform (id integer primary key AUTOINCREMENT, model_id integer NOT NULL UNIQUE REFERENCES model(id) ON DELETE CASCADE, tx real NOT NULL DEFAULT 0.0, ty real NOT NULL DEFAULT 0.0, tz real NOT NULL DEFAULT 0.0, rx real NOT NULL DEFAULT 0.0, ry real NOT NULL DEFAULT 0.0, rz real NOT NULL DEFAULT 0.0, sx real NOT NULL DEFAULT 1.0, sy real NOT NULL DEFAULT 1.0, sz real NOT NULL DEFAULT 1.0) STRICT`,
 		`CREATE TABLE vertex (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE, x real NOT NULL, y real NOT NULL, z real NOT NULL) STRICT`,
+		`CREATE TABLE edge (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE, start_vertex_id integer NOT NULL REFERENCES vertex(id) ON DELETE CASCADE, end_vertex_id integer NOT NULL REFERENCES vertex(id) ON DELETE CASCADE) STRICT`,
+		`CREATE TABLE face (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE) STRICT`,
+		`CREATE TABLE face_vertex (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE, face_id integer NOT NULL REFERENCES face(id) ON DELETE CASCADE, vertex_id integer NOT NULL REFERENCES vertex(id) ON DELETE CASCADE, sort integer) STRICT`,
 		`CREATE VIEW model_vertex AS SELECT v.id AS vertex_id, m.id AS model_id, ((cos(COALESCE(mt.ry,0))*cos(COALESCE(mt.rz,0))*(v.x*COALESCE(mt.sx, 1)) + (-cos(COALESCE(mt.ry,0))*sin(COALESCE(mt.rz,0)))*(v.y*COALESCE(mt.sy, 1)) + sin(COALESCE(mt.ry,0))*(v.z*COALESCE(mt.sz, 1)))-COALESCE(mt.tx, 0)) AS x, ((((cos(COALESCE(mt.rx,0))*sin(COALESCE(mt.rz,0)) + sin(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*cos(COALESCE(mt.rz,0)))*(v.x*COALESCE(mt.sx, 1)) + (cos(COALESCE(mt.rx,0))*cos(COALESCE(mt.rz,0)) - sin(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*sin(COALESCE(mt.rz,0)))*(v.y*COALESCE(mt.sy, 1)) + (-sin(COALESCE(mt.rx,0))*cos(COALESCE(mt.ry,0)))*(v.z*COALESCE(mt.sz, 1))))-COALESCE(mt.ty, 0)) AS y, (((sin(COALESCE(mt.rx,0))*sin(COALESCE(mt.rz,0)) - cos(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*cos(COALESCE(mt.rz,0)))*(v.x*COALESCE(mt.sx, 1)) + (sin(COALESCE(mt.rx,0))*cos(COALESCE(mt.rz,0)) + cos(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*sin(COALESCE(mt.rz,0)))*(v.y*COALESCE(mt.sy, 1)) + (cos(COALESCE(mt.rx,0))*cos(COALESCE(mt.ry,0)))*(v.z*COALESCE(mt.sz, 1)))-COALESCE(mt.tz, 0)) AS z FROM vertex v INNER JOIN model m ON m.id = v.model_id INNER JOIN model_transform mt ON mt.model_id = m.id`,
 		`CREATE VIEW camera_vertex AS SELECT v.vertex_id AS vertex_id, c.id AS camera_id, (v.x-c.tx) AS x, (v.y-c.ty) AS y, (v.z-c.tz) AS z FROM model_vertex v, camera c`,
 		`CREATE VIEW perspective_vertex AS SELECT v.vertex_id AS vertex_id, v.camera_id AS camera_id, (v.x/tan(c.fov/2)*c.aspect) AS x, (v.y/tan(c.fov/2)) AS y, (-v.z*((c.far+c.near)/(c.far-c.near))-((2*c.far*c.near)/(c.far-c.near))) AS z, -v.z as w FROM camera_vertex v INNER JOIN camera c ON c.id = v.camera_id`,
@@ -31,30 +35,27 @@
 
 		`CREATE VIEW projected_vertex AS SELECT vp.id AS viewport_id, v.vertex_id AS vertex_id, v.camera_id AS camera_id, vp.width * (0.5 + 0.5*v.x) AS x, vp.height * (0.5 + 0.5*v.y) AS y, v.z AS z, v.w AS w FROM ndc_vertex v INNER JOIN viewport vp ON vp.camera_id = v.camera_id WHERE abs(v.x) < 1 AND  abs(v.y) < 1  AND abs(v.z) < 1`,
 		`CREATE VIEW projected_edge AS SELECT vp.id AS viewport_id, e.id AS edge_id, e.camera_id AS camera_id, vp.width * (0.5 + 0.5*e.x1) AS x1, vp.height * (0.5 + 0.5*e.y1) AS y1, e.z1 AS z1, e.w1 AS w1, vp.width * (0.5 + 0.5*e.x2) AS x2, vp.height * (0.5 + 0.5*e.y2) AS y2, e.z2 AS z2, e.w2 AS w2 FROM ndc_edge e INNER JOIN viewport vp ON vp.camera_id = e.camera_id WHERE abs(e.x1) < 1 AND  abs(e.y1) < 1  AND abs(e.z1) < 1 AND  abs(e.x2) < 1 AND  abs(e.y2) < 1  AND abs(e.z2) < 1`,
-		`CREATE VIEW projected_face AS SELECT fv.model_id as model_id, v.viewport_id AS viewport_id, IF(face_area.area_twice > 0, "blue", "red") AS clockcolor, face_area.area_twice > 0 AS clockwise, face.id AS face_id, v.vertex_id AS vertex_id, GROUP_CONCAT(CONCAT(v.x, ", ", v.y), ' ') AS points FROM face INNER JOIN face_projected_signed_area face_area ON face_area.face_id = face.id INNER JOIN face_vertex fv ON fv.face_id = face.id INNER JOIN projected_vertex v ON v.vertex_id = fv.vertex_id GROUP BY fv.face_id, fv.model_id ORDER BY face_area.area_twice ASC, MIN(v.z) DESC`,
-		`CREATE TABLE edge (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE, start_vertex_id integer NOT NULL REFERENCES vertex(id) ON DELETE CASCADE, end_vertex_id integer NOT NULL REFERENCES vertex(id) ON DELETE CASCADE) STRICT`,
-		`CREATE TABLE face (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE) STRICT`,
-		`CREATE TABLE face_vertex (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE, face_id integer NOT NULL REFERENCES face(id) ON DELETE CASCADE, vertex_id integer NOT NULL REFERENCES vertex(id) ON DELETE CASCADE, sort integer) STRICT`,
+
 		`CREATE VIEW face_vertex_neighbor AS SELECT face_vertex.*,
 			         LEAD(face_vertex.vertex_id) OVER w AS next_vertex_id,
 			         LAG(face_vertex.vertex_id) OVER w AS prev_vertex_id
 			  FROM face_vertex
 			  WINDOW w AS (PARTITION BY face_vertex.face_id ORDER BY sort)`,
-		`CREATE VIEW face_vertex_neighbor_wrapped AS 
-			SELECT
-					 inner.face_id AS face_id,
-					 inner.vertex_id AS vertex_id, 
-			         COALESCE(next_vertex_id, first_id) AS id_next,
-			         COALESCE(prev_vertex_id, last_id) AS id_prev
-			  FROM (
-			    SELECT fv.*,
+		`CREATE VIEW face_vertex_neighbor_wrapped_helper AS 
+			 SELECT fv.*,
 					   fvn.next_vertex_id AS next_vertex_id,
 					   fvn.prev_vertex_id AS prev_vertex_id,
 			           FIRST_VALUE(fvn.vertex_id) OVER (PARTITION BY fvn.face_id ORDER BY fvn.sort) AS first_id,
 			           FIRST_VALUE(fvn.vertex_id) OVER (PARTITION BY fvn.face_id ORDER BY -fvn.sort) AS last_id
 			    FROM face_vertex_neighbor fvn 
-			    INNER JOIN face_vertex fv ON fv.id = fvn.id
-			  ) AS inner`,
+			    INNER JOIN face_vertex fv ON fv.id = fvn.id`,
+		`CREATE VIEW face_vertex_neighbor_wrapped AS 
+			SELECT
+					 helper.face_id AS face_id,
+					 helper.vertex_id AS vertex_id, 
+			         COALESCE(next_vertex_id, first_id) AS id_next,
+			         COALESCE(prev_vertex_id, last_id) AS id_prev
+			  FROM face_vertex_neighbor_wrapped_helper helper`,
 		`CREATE VIEW face_projected_signed_area AS SELECT 
 			fvw.face_id AS face_id,
 			 SUM((v1.x * v2.y) - (v2.x * v1.y)) AS area_twice
@@ -62,8 +63,10 @@
 			INNER JOIN projected_vertex v1 ON v1.vertex_id = fvw.vertex_id
 			INNER JOIN projected_vertex v2 ON v2.vertex_id = fvw.id_next
 			GROUP BY fvw.face_id`,
-		`INSERT INTO viewport(id, camera_id, width,height) VALUES(1, 1, 1, 1)`,
+		`CREATE VIEW projected_face AS SELECT fv.model_id as model_id, v.viewport_id AS viewport_id, IF(MAX(face_area.area_twice) > 0, 'blue', 'red') AS clockcolor, IF(MAX(face_area.area_twice) > 0, 0.5, 1) AS opacity, MAX(face_area.area_twice) > 0 AS clockwise, face.id AS face_id, GROUP_CONCAT(CONCAT(v.x, ', ', v.y), ' ') AS points FROM face INNER JOIN face_projected_signed_area face_area ON face_area.face_id = face.id INNER JOIN face_vertex fv ON fv.face_id = face.id INNER JOIN projected_vertex v ON v.vertex_id = fv.vertex_id GROUP BY fv.face_id, fv.model_id, face.id, v.viewport_id ORDER BY MAX(face_area.area_twice) ASC, MIN(v.z) DESC`,
 		`INSERT INTO camera(id,tx,ty,tz, near, far, fov, aspect) VALUES(1, 0, 0, 50, 0.1, 100, 1, 1)`,
+		`INSERT INTO viewport(id, camera_id, width,height) VALUES(1, 1, 1, 1)`,
+
 		"PRAGMA foreign_keys = ON",
 	];
 
@@ -190,6 +193,24 @@
 			locateFile: (file) => `https://sql.js.org/dist/${file}`,
 		});
 		db = new SQL.Database();
+
+		const duck = await makeDB();
+
+		for (const cmd of schemaCreation) {
+			if (cmd.startsWith("PRAGMA")) {
+				continue;
+			}
+			await duck.query(
+				cmd
+					.replace(
+						/CREATE TABLE (\S+) \(id integer primary key AUTOINCREMENT/,
+						"CREATE SEQUENCE seq_$1_id START 1; CREATE TABLE $1 (id integer primary key DEFAULT(nextval('seq_$1_id'))",
+					)
+					.replace(/\) STRICT$/, ")")
+					.replace(/ ON DELETE (CASCADE|SET NULL|SET DEFAULT)/g, "")
+					.replace(/ ON UPDATE (CASCADE|SET NULL|SET DEFAULT)/g, ""),
+			);
+		}
 
 		db.run(schemaCreation.join(";\n"));
 
@@ -575,7 +596,7 @@
 				stroke-linejoin="round"
 				stroke-linecap="round"
 				fill={f.clockcolor}
-				opacity="0.3"
+				opacity={f.opacity}
 				stroke={"black"}
 				stroke-width="1"
 				points={f.points}
