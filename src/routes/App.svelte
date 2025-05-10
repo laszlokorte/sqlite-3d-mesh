@@ -11,20 +11,91 @@
 	let edges = $state([]);
 	let faces = $state([]);
 	let camera = $state({});
-	let transform = $state({});
+	let transform = $state([]);
 	let viewport = $state({ width: 0, height: 0 });
 	let statements = {};
 
+	const schemaCreation = [
+		`CREATE TABLE camera (id integer primary key AUTOINCREMENT, tx real NOT NULL, ty real NOT NULL, tz real NOT NULL, near real NOT NULL, far real NOT NULL, fov real NOT NULL, aspect real NOT NULL) STRICT`,
+		`CREATE TABLE viewport (id integer primary key AUTOINCREMENT, width REAL NOT NULL, height REAL NOT NULL, camera_id integer NOT NULL REFERENCES camera(id) ON DELETE CASCADE) STRICT`,
+		`CREATE TABLE model (id integer primary key AUTOINCREMENT ) STRICT`,
+		`CREATE TABLE model_transform (id integer primary key AUTOINCREMENT, model_id integer NOT NULL UNIQUE REFERENCES model(id) ON DELETE CASCADE, tx real NOT NULL DEFAULT 0.0, ty real NOT NULL DEFAULT 0.0, tz real NOT NULL DEFAULT 0.0, rx real NOT NULL DEFAULT 0.0, ry real NOT NULL DEFAULT 0.0, rz real NOT NULL DEFAULT 0.0, sx real NOT NULL DEFAULT 1.0, sy real NOT NULL DEFAULT 1.0, sz real NOT NULL DEFAULT 1.0) STRICT`,
+		`CREATE TABLE vertex (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE, x real NOT NULL, y real NOT NULL, z real NOT NULL) STRICT`,
+		`CREATE VIEW model_vertex AS SELECT v.id AS vertex_id, m.id AS model_id, ((cos(COALESCE(mt.ry,0))*cos(COALESCE(mt.rz,0))*(v.x*COALESCE(mt.sx, 1)) + (-cos(COALESCE(mt.ry,0))*sin(COALESCE(mt.rz,0)))*(v.y*COALESCE(mt.sy, 1)) + sin(COALESCE(mt.ry,0))*(v.z*COALESCE(mt.sz, 1)))-COALESCE(mt.tx, 0)) AS x, ((((cos(COALESCE(mt.rx,0))*sin(COALESCE(mt.rz,0)) + sin(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*cos(COALESCE(mt.rz,0)))*(v.x*COALESCE(mt.sx, 1)) + (cos(COALESCE(mt.rx,0))*cos(COALESCE(mt.rz,0)) - sin(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*sin(COALESCE(mt.rz,0)))*(v.y*COALESCE(mt.sy, 1)) + (-sin(COALESCE(mt.rx,0))*cos(COALESCE(mt.ry,0)))*(v.z*COALESCE(mt.sz, 1))))-COALESCE(mt.ty, 0)) AS y, (((sin(COALESCE(mt.rx,0))*sin(COALESCE(mt.rz,0)) - cos(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*cos(COALESCE(mt.rz,0)))*(v.x*COALESCE(mt.sx, 1)) + (sin(COALESCE(mt.rx,0))*cos(COALESCE(mt.rz,0)) + cos(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*sin(COALESCE(mt.rz,0)))*(v.y*COALESCE(mt.sy, 1)) + (cos(COALESCE(mt.rx,0))*cos(COALESCE(mt.ry,0)))*(v.z*COALESCE(mt.sz, 1)))-COALESCE(mt.tz, 0)) AS z FROM vertex v INNER JOIN model m ON m.id = v.model_id INNER JOIN model_transform mt ON mt.model_id = m.id`,
+		`CREATE VIEW camera_vertex AS SELECT v.vertex_id AS vertex_id, c.id AS camera_id, (v.x-c.tx) AS x, (v.y-c.ty) AS y, (v.z-c.tz) AS z FROM model_vertex v, camera c`,
+		`CREATE VIEW perspective_vertex AS SELECT v.vertex_id AS vertex_id, v.camera_id AS camera_id, (v.x/tan(c.fov/2)*c.aspect) AS x, (v.y/tan(c.fov/2)) AS y, (-v.z*((c.far+c.near)/(c.far-c.near))-((2*c.far*c.near)/(c.far-c.near))) AS z, -v.z as w FROM camera_vertex v INNER JOIN camera c ON c.id = v.camera_id`,
+		`CREATE VIEW ndc_vertex AS SELECT v.vertex_id AS vertex_id, v.camera_id AS camera_id, (v.x/v.w) AS x, (v.y/v.w) AS y, (v.z/v.w) AS z, v.w AS w FROM perspective_vertex v`,
+
+		`CREATE VIEW ndc_edge AS SELECT edge.id AS id, a.camera_id AS camera_id, (a.x/a.w) AS x1, (a.y/a.w) AS y1, (a.z/a.w) AS z1, (a.w/a.w) AS w1, (b.x/b.w) AS x2, (b.y/b.w) AS y2, (b.z/b.w) AS z2, b.w AS w2 FROM edge INNER JOIN perspective_vertex a ON a.vertex_id = edge.start_vertex_id INNER JOIN perspective_vertex b ON b.vertex_id = edge.end_vertex_id WHERE a.camera_id = b.camera_id`,
+		//`CREATE VIEW ndc_face AS SELECT v.vertex_id AS vertex_id, v.camera_id AS camera_id, (v.x/v.w) AS x, (v.y/v.w) AS y, (v.z/v.w) AS z, v.w AS w FROM perspective_vertex v`,
+
+		`CREATE VIEW projected_vertex AS SELECT vp.id AS viewport_id, v.vertex_id AS vertex_id, v.camera_id AS camera_id, vp.width * (0.5 + 0.5*v.x) AS x, vp.height * (0.5 + 0.5*v.y) AS y, v.z AS z, v.w AS w FROM ndc_vertex v INNER JOIN viewport vp ON vp.camera_id = v.camera_id WHERE abs(v.x) < 1 AND  abs(v.y) < 1  AND abs(v.z) < 1`,
+		`CREATE VIEW projected_edge AS SELECT vp.id AS viewport_id, e.id AS edge_id, e.camera_id AS camera_id, vp.width * (0.5 + 0.5*e.x1) AS x1, vp.height * (0.5 + 0.5*e.y1) AS y1, e.z1 AS z1, e.w1 AS w1, vp.width * (0.5 + 0.5*e.x2) AS x2, vp.height * (0.5 + 0.5*e.y2) AS y2, e.z2 AS z2, e.w2 AS w2 FROM ndc_edge e INNER JOIN viewport vp ON vp.camera_id = e.camera_id WHERE abs(e.x1) < 1 AND  abs(e.y1) < 1  AND abs(e.z1) < 1 AND  abs(e.x2) < 1 AND  abs(e.y2) < 1  AND abs(e.z2) < 1`,
+		`CREATE VIEW projected_face AS SELECT fv.model_id as model_id, v.viewport_id AS viewport_id, IF(face_area.area_twice > 0, "blue", "red") AS clockcolor, face_area.area_twice > 0 AS clockwise, face.id AS face_id, v.vertex_id AS vertex_id, GROUP_CONCAT(CONCAT(v.x, ", ", v.y), ' ') AS points FROM face INNER JOIN face_projected_signed_area face_area ON face_area.face_id = face.id INNER JOIN face_vertex fv ON fv.face_id = face.id INNER JOIN projected_vertex v ON v.vertex_id = fv.vertex_id GROUP BY fv.face_id, fv.model_id ORDER BY face_area.area_twice ASC, MIN(v.z) DESC`,
+		`CREATE TABLE edge (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE, start_vertex_id integer NOT NULL REFERENCES vertex(id) ON DELETE CASCADE, end_vertex_id integer NOT NULL REFERENCES vertex(id) ON DELETE CASCADE) STRICT`,
+		`CREATE TABLE face (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE) STRICT`,
+		`CREATE TABLE face_vertex (id integer primary key AUTOINCREMENT, model_id integer NOT NULL REFERENCES model(id) ON DELETE CASCADE, face_id integer NOT NULL REFERENCES face(id) ON DELETE CASCADE, vertex_id integer NOT NULL REFERENCES vertex(id) ON DELETE CASCADE, sort integer) STRICT`,
+		`CREATE VIEW face_vertex_neighbor AS SELECT face_vertex.*,
+			         LEAD(face_vertex.vertex_id) OVER w AS next_vertex_id,
+			         LAG(face_vertex.vertex_id) OVER w AS prev_vertex_id
+			  FROM face_vertex
+			  WINDOW w AS (PARTITION BY face_vertex.face_id ORDER BY sort)`,
+		`CREATE VIEW face_vertex_neighbor_wrapped AS 
+			SELECT
+					 inner.face_id AS face_id,
+					 inner.vertex_id AS vertex_id, 
+			         COALESCE(next_vertex_id, first_id) AS id_next,
+			         COALESCE(prev_vertex_id, last_id) AS id_prev
+			  FROM (
+			    SELECT fv.*,
+					   fvn.next_vertex_id AS next_vertex_id,
+					   fvn.prev_vertex_id AS prev_vertex_id,
+			           FIRST_VALUE(fvn.vertex_id) OVER (PARTITION BY fvn.face_id ORDER BY fvn.sort) AS first_id,
+			           FIRST_VALUE(fvn.vertex_id) OVER (PARTITION BY fvn.face_id ORDER BY -fvn.sort) AS last_id
+			    FROM face_vertex_neighbor fvn 
+			    INNER JOIN face_vertex fv ON fv.id = fvn.id
+			  ) AS inner`,
+		`CREATE VIEW face_projected_signed_area AS SELECT 
+			fvw.face_id AS face_id,
+			 SUM((v1.x * v2.y) - (v2.x * v1.y)) AS area_twice
+			FROM face_vertex_neighbor_wrapped fvw 
+			INNER JOIN projected_vertex v1 ON v1.vertex_id = fvw.vertex_id
+			INNER JOIN projected_vertex v2 ON v2.vertex_id = fvw.id_next
+			GROUP BY fvw.face_id`,
+		`INSERT INTO viewport(id, camera_id, width,height) VALUES(1, 1, 1, 1)`,
+		`INSERT INTO camera(id,tx,ty,tz, near, far, fov, aspect) VALUES(1, 0, 0, 50, 0.1, 100, 1, 1)`,
+		"PRAGMA foreign_keys = ON",
+	];
+
+	const statementTemplates = (statements = {
+		cameraSelect: "SELECT * FROM camera",
+		transformSelect: "SELECT * FROM model_transform ORDER BY id DESC",
+		viewportSelect: "SELECT * FROM viewport",
+		vertexSelect:
+			"SELECT vertex_id AS id, x, y, z, w FROM projected_vertex WHERE viewport_id = $viewport",
+		edgeSelect:
+			"SELECT * FROM projected_edge WHERE viewport_id = $viewport",
+		faceSelect:
+			"SELECT * FROM projected_face WHERE viewport_id = $viewport AND ($clockwise = clockwise) IS DISTINCT FROM FALSE ORDER BY ($clockwise <> clockwise) ASC",
+	});
+
 	let db;
 
-	function importModel(db, model, sx = 1, sy = 1, sz = 1) {
+	function importModel(
+		db,
+		model,
+		sx = 1,
+		sy = 1,
+		sz = 1,
+		{ tx = 0, ty = 0, tz = 0 } = {},
+	) {
 		const lines = model.split("\n");
 
 		const insertModel = db.prepare(
 			"INSERT INTO model DEFAULT VALUES  RETURNING id",
 		);
 		const insertModelTransform = db.prepare(
-			"INSERT INTO model_transform(model_id) VALUES(?) RETURNING  id",
+			"INSERT INTO model_transform(model_id,tx,ty,tz) VALUES(?,?,?,?) RETURNING  id",
 		);
 		const insertVertex = db.prepare(
 			"INSERT INTO vertex (model_id, x,y,z) VALUES(?,?,?,?) RETURNING id",
@@ -42,7 +113,7 @@
 			if (line.startsWith("o ")) {
 				insertModel.step();
 				[modelId] = insertModel.get();
-				insertModelTransform.bind([modelId]);
+				insertModelTransform.bind([modelId, tx, ty, tz]);
 				insertModelTransform.step();
 				const [modelTransformId] = insertModelTransform.get();
 			} else if (line.startsWith("v ")) {
@@ -119,76 +190,18 @@
 			locateFile: (file) => `https://sql.js.org/dist/${file}`,
 		});
 		db = new SQL.Database();
-		let sqlstr = [
-			`CREATE TABLE camera (id integer primary key AUTOINCREMENT , tx real NOT NULL, ty real NOT NULL, tz real NOT NULL, near real NOT NULL, far real NOT NULL, fov real NOT NULL, aspect real NOT NULL) STRICT`,
-			`CREATE TABLE viewport (id integer primary key AUTOINCREMENT , width REAL NOT NULL, height REAL NOT NULL, camera_id integer NOT NULL REFERENCES camera(id)) STRICT`,
-			`CREATE TABLE model (id integer primary key AUTOINCREMENT ) STRICT`,
-			`CREATE TABLE model_transform (id integer primary key AUTOINCREMENT , model_id integer NOT NULL UNIQUE REFERENCES model(id), tx real NOT NULL DEFAULT 0.0, ty real NOT NULL DEFAULT 0.0, tz real NOT NULL DEFAULT 0.0, rx real NOT NULL DEFAULT 0.0, ry real NOT NULL DEFAULT 0.0, rz real NOT NULL DEFAULT 0.0, sx real NOT NULL DEFAULT 1.0, sy real NOT NULL DEFAULT 1.0, sz real NOT NULL DEFAULT 1.0) STRICT`,
-			`CREATE TABLE vertex (id integer primary key AUTOINCREMENT , model_id integer NOT NULL REFERENCES model(id), x real NOT NULL, y real NOT NULL, z real NOT NULL) STRICT`,
-			`CREATE VIEW model_vertex AS SELECT v.id AS vertex_id, m.id AS model_id, ((cos(COALESCE(mt.ry,0))*cos(COALESCE(mt.rz,0))*(v.x*COALESCE(mt.sx, 1)) + (-cos(COALESCE(mt.ry,0))*sin(COALESCE(mt.rz,0)))*(v.y*COALESCE(mt.sy, 1)) + sin(COALESCE(mt.ry,0))*(v.z*COALESCE(mt.sz, 1)))-COALESCE(mt.tx, 0)) AS x, ((((cos(COALESCE(mt.rx,0))*sin(COALESCE(mt.rz,0)) + sin(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*cos(COALESCE(mt.rz,0)))*(v.x*COALESCE(mt.sx, 1)) + (cos(COALESCE(mt.rx,0))*cos(COALESCE(mt.rz,0)) - sin(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*sin(COALESCE(mt.rz,0)))*(v.y*COALESCE(mt.sy, 1)) + (-sin(COALESCE(mt.rx,0))*cos(COALESCE(mt.ry,0)))*(v.z*COALESCE(mt.sz, 1))))-COALESCE(mt.ty, 0)) AS y, (((sin(COALESCE(mt.rx,0))*sin(COALESCE(mt.rz,0)) - cos(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*cos(COALESCE(mt.rz,0)))*(v.x*COALESCE(mt.sx, 1)) + (sin(COALESCE(mt.rx,0))*cos(COALESCE(mt.rz,0)) + cos(COALESCE(mt.rx,0))*sin(COALESCE(mt.ry,0))*sin(COALESCE(mt.rz,0)))*(v.y*COALESCE(mt.sy, 1)) + (cos(COALESCE(mt.rx,0))*cos(COALESCE(mt.ry,0)))*(v.z*COALESCE(mt.sz, 1)))-COALESCE(mt.tz, 0)) AS z FROM vertex v INNER JOIN model m ON m.id = v.model_id INNER JOIN model_transform mt ON mt.model_id = m.id`,
-			`CREATE VIEW camera_vertex AS SELECT v.vertex_id AS vertex_id, c.id AS camera_id, (v.x-c.tx) AS x, (v.y-c.ty) AS y, (v.z-c.tz) AS z FROM model_vertex v, camera c`,
-			`CREATE VIEW perspective_vertex AS SELECT v.vertex_id AS vertex_id, v.camera_id AS camera_id, (v.x/tan(c.fov/2)*c.aspect) AS x, (v.y/tan(c.fov/2)) AS y, (-v.z*((c.far+c.near)/(c.far-c.near))-((2*c.far*c.near)/(c.far-c.near))) AS z, -v.z as w FROM camera_vertex v INNER JOIN camera c ON c.id = v.camera_id`,
-			`CREATE VIEW ndc_vertex AS SELECT v.vertex_id AS vertex_id, v.camera_id AS camera_id, (v.x/v.w) AS x, (v.y/v.w) AS y, (v.z/v.w) AS z, v.w AS w FROM perspective_vertex v`,
 
-			`CREATE VIEW ndc_edge AS SELECT edge.id AS id, a.camera_id AS camera_id, (a.x/a.w) AS x1, (a.y/a.w) AS y1, (a.z/a.w) AS z1, (a.w/a.w) AS w1, (b.x/b.w) AS x2, (b.y/b.w) AS y2, (b.z/b.w) AS z2, b.w AS w2 FROM edge INNER JOIN perspective_vertex a ON a.vertex_id = edge.start_vertex_id INNER JOIN perspective_vertex b ON b.vertex_id = edge.end_vertex_id WHERE a.camera_id = b.camera_id`,
-			//`CREATE VIEW ndc_face AS SELECT v.vertex_id AS vertex_id, v.camera_id AS camera_id, (v.x/v.w) AS x, (v.y/v.w) AS y, (v.z/v.w) AS z, v.w AS w FROM perspective_vertex v`,
+		db.run(schemaCreation.join(";\n"));
 
-			`CREATE VIEW projected_vertex AS SELECT vp.id AS viewport_id, v.vertex_id AS vertex_id, v.camera_id AS camera_id, vp.width * (0.5 + 0.5*v.x) AS x, vp.height * (0.5 + 0.5*v.y) AS y, v.z AS z, v.w AS w FROM ndc_vertex v INNER JOIN viewport vp ON vp.camera_id = v.camera_id WHERE abs(v.x) < 1 AND  abs(v.y) < 1  AND abs(v.z) < 1`,
-			`CREATE VIEW projected_edge AS SELECT vp.id AS viewport_id, e.id AS edge_id, e.camera_id AS camera_id, vp.width * (0.5 + 0.5*e.x1) AS x1, vp.height * (0.5 + 0.5*e.y1) AS y1, e.z1 AS z1, e.w1 AS w1, vp.width * (0.5 + 0.5*e.x2) AS x2, vp.height * (0.5 + 0.5*e.y2) AS y2, e.z2 AS z2, e.w2 AS w2 FROM ndc_edge e INNER JOIN viewport vp ON vp.camera_id = e.camera_id WHERE abs(e.x1) < 1 AND  abs(e.y1) < 1  AND abs(e.z1) < 1 AND  abs(e.x2) < 1 AND  abs(e.y2) < 1  AND abs(e.z2) < 1`,
-			`CREATE VIEW projected_face AS SELECT fv.model_id as model_id, v.viewport_id AS viewport_id, IF(face_area.area_twice > 0, "red", "blue") AS clockcolor, face_area.area_twice > 0 AS clockwise, face.id AS face_id, v.vertex_id AS vertex_id, GROUP_CONCAT(CONCAT(v.x, ", ", v.y), ' ') AS points FROM face INNER JOIN face_projected_signed_area face_area ON face_area.face_id = face.id INNER JOIN face_vertex fv ON fv.face_id = face.id INNER JOIN projected_vertex v ON v.vertex_id = fv.vertex_id GROUP BY fv.face_id, fv.model_id ORDER BY face_area.area_twice DESC, MIN(v.z) DESC`,
-			`CREATE TABLE edge (id integer primary key AUTOINCREMENT , model_id integer NOT NULL REFERENCES model(id), start_vertex_id integer NOT NULL REFERENCES vertex(id), end_vertex_id integer NOT NULL REFERENCES vertex(id)) STRICT`,
-			`CREATE TABLE face (id integer primary key AUTOINCREMENT , model_id integer NOT NULL REFERENCES model(id)) STRICT`,
-			`CREATE TABLE face_vertex (id integer primary key AUTOINCREMENT , model_id integer NOT NULL REFERENCES model(id), face_id integer NOT NULL REFERENCES face(id), vertex_id integer NOT NULL REFERENCES vertex(id), sort integer) STRICT`,
-			`CREATE VIEW face_vertex_neighbor AS SELECT face_vertex.*,
-			         LEAD(face_vertex.vertex_id) OVER w AS next_vertex_id,
-			         LAG(face_vertex.vertex_id) OVER w AS prev_vertex_id
-			  FROM face_vertex
-			  WINDOW w AS (PARTITION BY face_vertex.face_id ORDER BY sort)`,
-			`CREATE VIEW face_vertex_neighbor_wrapped AS 
-			SELECT
-					 inner.face_id AS face_id,
-					 inner.vertex_id AS vertex_id, 
-			         COALESCE(next_vertex_id, first_id) AS id_next,
-			         COALESCE(prev_vertex_id, last_id) AS id_prev
-			  FROM (
-			    SELECT fv.*,
-					   fvn.next_vertex_id AS next_vertex_id,
-					   fvn.prev_vertex_id AS prev_vertex_id,
-			           FIRST_VALUE(fvn.vertex_id) OVER (PARTITION BY fvn.face_id ORDER BY fvn.sort) AS first_id,
-			           FIRST_VALUE(fvn.vertex_id) OVER (PARTITION BY fvn.face_id ORDER BY -fvn.sort) AS last_id
-			    FROM face_vertex_neighbor fvn 
-			    INNER JOIN face_vertex fv ON fv.id = fvn.id
-			  ) AS inner`,
-			`CREATE VIEW face_projected_signed_area AS SELECT 
-			fvw.face_id AS face_id,
-			 SUM((v1.x * v2.y) - (v2.x * v1.y)) AS area_twice
-			FROM face_vertex_neighbor_wrapped fvw 
-			INNER JOIN projected_vertex v1 ON v1.vertex_id = fvw.vertex_id
-			INNER JOIN projected_vertex v2 ON v2.vertex_id = fvw.id_next
-			GROUP BY fvw.face_id`,
-			`INSERT INTO viewport(id, camera_id, width,height) VALUES(1, 1, 1, 1)`,
-			`INSERT INTO camera(id,tx,ty,tz, near, far, fov, aspect) VALUES(1, 0, 0, 50, 0.1, 100, 1, 1)`,
-		].join(";\n");
-		db.run(sqlstr);
-
-		statements = {
-			cameraSelect: db.prepare("SELECT * FROM camera"),
-			transformSelect: db.prepare("SELECT * FROM model_transform"),
-			viewportSelect: db.prepare("SELECT * FROM viewport"),
-			vertexSelect: db.prepare(
-				"SELECT vertex_id AS id, x, y, z, w FROM projected_vertex WHERE viewport_id = $viewport",
-			),
-			edgeSelect: db.prepare(
-				"SELECT * FROM projected_edge WHERE viewport_id = $viewport",
-			),
-			faceSelect: db.prepare(
-				"SELECT * FROM projected_face WHERE viewport_id = $viewport AND ($clockwise = clockwise) IS DISTINCT FROM FALSE ORDER BY ($clockwise = clockwise) DESC",
-			),
-		};
+		statements = Object.fromEntries(
+			Object.entries(statementTemplates).map(([k, v]) => [
+				k,
+				db.prepare(v),
+			]),
+		);
 		setViewport(db, window.innerWidth, window.innerHeight);
 
-		importModel(db, model1, 4, 4, 4);
-		importModel(db, model2, 8, -8, 8);
+		importModel(db, model1, 4, 4, 4, { tx: 10 });
 
 		update(db);
 
@@ -217,6 +230,11 @@
 		update(db);
 	}
 
+	function deleteModel(db, model_id) {
+		db.run("DELETE FROM model WHERE id = ?", [model_id]);
+		update(db);
+	}
+
 	function setViewport(db, w, h) {
 		db.run("UPDATE viewport SET width=?,height=? WHERE id = 1", [w, h]);
 		db.run("UPDATE camera SET aspect=? WHERE id = 1", [h / w]);
@@ -225,10 +243,10 @@
 
 	function update(db) {
 		if (db) {
-			const test = db.prepare("SELECT * FROM face_vertex");
-			while (test.step()) {
-				console.log(test.getAsObject());
-			}
+			// const test = db.prepare("SELECT * FROM face_vertex");
+			// while (test.step()) {
+			// 	console.log(test.getAsObject());
+			// }
 			{
 				if (statements.cameraSelect.step()) {
 					camera = statements.cameraSelect.getAsObject();
@@ -288,7 +306,17 @@
 </script>
 
 <div class="app">
-	<h1>SQLite 3D Renderer</h1>
+	<div>
+		<h1>SQLite 3D Renderer</h1>
+		<p>This is a demo of projecting 3d triangles via SQL queries.</p>
+		<p>
+			Think <code
+				>SELECT project(...) as x, project(...) as y FROM model, vertex,
+				camera, transform WHERE clockwise AND clipped IN BETWEEN -1 AND
+				1</code
+			>
+		</p>
+	</div>
 	<div class="overlay">
 		<h2>Backface Culling</h2>
 		<form
@@ -386,8 +414,33 @@
 			</div>
 		</form>
 
+		<div>
+			<button
+				type="button"
+				onclick={(e) => {
+					importModel(db, model1, 4, 4, 4, {
+						tx: 10 - 10 * transform.length,
+					});
+					update(db);
+				}}>Add Cube</button
+			>
+
+			<button
+				type="button"
+				onclick={(e) => {
+					importModel(db, model2, 8, -8, 8, {
+						tx: 10 - 10 * transform.length,
+					});
+					update(db);
+				}}>Add Suzanne</button
+			>
+		</div>
+
 		{#each transform as t}
 			<h2>Model #{t.model_id}</h2>
+			<button type="button" onclick={(e) => deleteModel(db, t.model_id)}
+				>Delete</button
+			>
 			<form
 				oninput={(evt) => {
 					setTransform(
@@ -502,7 +555,17 @@
 				</div>
 			</form>
 		{/each}
-		{faces.length}
+
+		<h2>DB Schema</h2>
+		<div style="width: 100%;  overflow: auto;">
+			{#each schemaCreation as table}
+				<pre>{table}</pre>
+			{/each}
+
+			{#each statementTemplates as _, select}
+				<pre>{select}</pre>
+			{/each}
+		</div>
 	</div>
 
 	<svg class="viewport" viewBox="0 0 {viewport.width} {viewport.height}">
@@ -512,11 +575,11 @@
 				stroke-linejoin="round"
 				stroke-linecap="round"
 				fill={f.clockcolor}
-				opacity="0.5"
+				opacity="0.3"
 				stroke={"black"}
 				stroke-width="1"
 				points={f.points}
-				stroke-dasharray={f.clockwise ? "10 10" : ""}
+				stroke-dasharray={f.clockwise ? "none" : "10 10"}
 			></polygon>
 		{/each}
 
@@ -535,7 +598,7 @@
 		margin: 0;
 	}
 	svg {
-		position: absolute;
+		position: fixed;
 		left: 0;
 		right: 0;
 		width: 100%;
@@ -544,18 +607,20 @@
 	}
 	.app {
 		display: grid;
-		grid-template-columns: 1fr 1fr 1fr;
+		padding: 1em;
+		grid-template-columns: repeat(auto-fill, minmax(32em, 1fr));
 		grid-template-rows: 1fr 1fr 1fr;
 		position: absolute;
-		width: 100vw;
-		height: 100vh;
+		gap: 1em;
+		width: 100%;
+		height: 100%;
+		box-sizing: border-box;
 	}
 
 	.overlay {
 		grid-area: 1/1 / 4 /1;
 		background: #aaa3;
 		padding: 1em;
-		margin: 1em;
 		gap: 1em;
 		display: grid;
 		align-content: start;
